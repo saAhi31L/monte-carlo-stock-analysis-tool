@@ -7,6 +7,7 @@
 
 import yfinance as yf
 import numpy as np
+import pandas as pd
 
 #-------------------------------------------------------------------------------------------------#
 # Shared batched fetch for the S&P 500 and VIX, used by both Market Regime and Market Sentiment
@@ -81,30 +82,37 @@ def getMarketSentiment(gspcClose, vixClose, vixTrendWindow=5, momentumWindow=5):
             "score": finalScore, "label": label, "vixRegime": vixRegime}
 
 #-------------------------------------------------------------------------------------------------#
-# Commodities Snapshot: price + 1-day % change for a handful of major commodity futures
+# Commodities Snapshot: price + 1-day % change for a handful of major commodity futures.
+# Uses each ticker's own regularMarketPrice/regularMarketChangePercent (the same fields behind
+# Yahoo Finance's own quote page) rather than diffing two daily OHLC bars via yf.download: futures
+# trade nearly 24/6, so the most recent daily bar is often still live/incomplete mid-session, and
+# diffing it against an older settled close produces a change % that doesn't match the real
+# previous-close reference (confirmed against CL=F: bar-diffing gave +5.2%, the live quote fields
+# gave +0.23%, matching Yahoo's own displayed change).
 
 commodityTickers = {
-    "Crude Oil": "CL=F",
-    "Gold": "GC=F",
-    "Silver": "SI=F",
-    "Natural Gas": "NG=F",
-    "Copper": "HG=F",
+    "Crude Oil": {"ticker": "CL=F", "fullName": "WTI Crude Oil Futures"},
+    "Gold": {"ticker": "GC=F", "fullName": "Gold Futures"},
+    "Silver": {"ticker": "SI=F", "fullName": "Silver Futures"},
+    "Natural Gas": {"ticker": "NG=F", "fullName": "Henry Hub Natural Gas Futures"},
+    "Copper": {"ticker": "HG=F", "fullName": "COMEX Copper Futures"},
 }
 
 def getCommoditiesSnapshot(tickers=commodityTickers):
-    raw = yf.download(list(tickers.values()), period="5d", progress=False,
-                       group_by="ticker", auto_adjust=False)
     results = []
-    for name, tkr in tickers.items():
+    for name, meta in tickers.items():
+        tkr = meta["ticker"]
         try:
-            closes = raw[tkr]["Close"].dropna()
-            if len(closes) < 2:
-                raise ValueError("insufficient data")
-            price = float(closes.iloc[-1])
-            changePct = float((closes.iloc[-1] - closes.iloc[-2]) / closes.iloc[-2] * 100)
-            results.append({"name": name, "ticker": tkr, "price": price, "changePct": changePct})
+            quoteInfo = yf.Ticker(tkr).info
+            price = quoteInfo.get('regularMarketPrice')
+            changePct = quoteInfo.get('regularMarketChangePercent')
+            if price is None or changePct is None:
+                raise ValueError("missing regular market quote fields")
+            results.append({"name": name, "ticker": tkr, "fullName": meta["fullName"],
+                             "price": float(price), "changePct": float(changePct)})
         except Exception:
-            results.append({"name": name, "ticker": tkr, "price": None, "changePct": None})
+            results.append({"name": name, "ticker": tkr, "fullName": meta["fullName"],
+                             "price": None, "changePct": None})
     return results
 
 #-------------------------------------------------------------------------------------------------#
@@ -188,3 +196,35 @@ def getInvestmentHorizonFit(closeData, epsGrowthPct, peRatio, deRatio):
         justification = f"Moderate volatility ({annualizedVolPct:.1f}%) with no major fundamental red flags supports either horizon."
 
     return {"annualizedVolPct": annualizedVolPct, "label": label, "justification": justification}
+
+#-------------------------------------------------------------------------------------------------#
+# Earnings Watch: flags forecast horizons that extend past the stock's next earnings date. The
+# Monte Carlo engine's drift/volatility come from past price behavior, which is exactly what an
+# earnings surprise can invalidate -- this is a caveat, not a signal, so it stays silent when
+# no selected horizon is actually affected.
+
+def getEarningsWarning(tickerOfUser, latestDate, horizonsTradingDays):
+    calendar = tickerOfUser.calendar
+    earningsDates = calendar.get('Earnings Date') if calendar else None
+    if not earningsDates:
+        return None
+
+    nextEarnings = min(earningsDates)
+    if nextEarnings <= latestDate.date():
+        return None
+
+    affectedHorizons = []
+    for tradingDays in horizonsTradingDays:
+        targetDate = pd.bdate_range(start=latestDate, periods=tradingDays + 1)[-1].date()
+        if nextEarnings <= targetDate:
+            affectedHorizons.append(tradingDays)
+
+    if not affectedHorizons:
+        return None
+
+    isEstimate = tickerOfUser.info.get('isEarningsDateEstimate', None)
+    return {
+        "earningsDate": nextEarnings,
+        "isEstimate": bool(isEstimate),
+        "affectedHorizons": sorted(set(affectedHorizons)),
+    }

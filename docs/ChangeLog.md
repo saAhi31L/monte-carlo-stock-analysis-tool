@@ -263,6 +263,115 @@ Anyone opening the repo can now tell at a glance what's the product versus what'
 
 ---
 
+### Change 12 — Split the Market-Context Prompt in Two, by Ticker Dependency
+
+**What happened:**
+The single "show broader market context" prompt (Change 10) bundled four sections together — Market Regime, Market Sentiment, Commodities, and Sector Fear Index — but only the last one actually needs the chosen ticker (to know which sector to highlight). Asking about all four in one place, mid-flow, meant the market's overall mood couldn't inform which stock the user picked in the first place, and the fundamentals report still felt cluttered.
+
+**What the new code does:**
+The single prompt is now two, placed where each one's data dependency actually allows:
+- **Before the ticker is entered at all**: `Show current market pulse (regime, sentiment, commodities)?` — fires Market Regime, Market Sentiment, and Commodities Snapshot immediately, since none of them need to know the stock.
+- **After the fundamentals print**: `Show sector fear index for {userTicker}'s sector?` — fires only the Sector Fear Index table, now that `info.get('sector')` is available to highlight the right row.
+
+Investment Horizon Fit stays always-on (ticker-specific, not part of either prompt), but its print statement moved to **after** the Sector Fear Index block instead of before it — so the fear index table isn't pushed down the page by ancillary text sitting above it.
+
+**Why this matters:**
+Market-wide context can now inform stock selection instead of only appearing after a ticker is already locked in, and the per-stock report stays focused: fundamentals, then (optionally) the sector comparison table, then the horizon-fit call.
+
+---
+
+### Change 13 — Added Interpretive Tags to Every Fundamental Stat, Fixed Incorrect "$" Formatting
+
+**What happened:**
+Only the trailing P/E Ratio had a plain-language tag next to it ("Fairly Valued" / "Over-Saturated" / "Under-Saturated"). Forward P/E, EPS Growth, D/E Ratio, P/B Ratio, 52-Week High/Low, and Turnover Rate were printed as bare numbers with no indication of whether that number was good, bad, or unremarkable. Several of them also had a stray `$` prefix left over from copy-pasting the P/E Ratio's print statement — a `$` in front of a P/E multiple, a percentage, or a leverage ratio is meaningless (e.g. `EPS Growth: $-26.11%`).
+
+**What the new code does:**
+Every stat now gets a tag, using the same three/four-tier banding style as the existing P/E tag:
+
+| Stat | Tag logic |
+|---|---|
+| Forward P/E | Same bands as trailing P/E: `<15` Under-Saturated, `15–30` Fairly Valued, `>30` Over-Saturated |
+| EPS Growth | `>15%` Strong Growth Expected, `0–15%` Modest Growth Expected, `-15–0%` Mild Decline Expected, `<-15%` Sharp Decline Expected |
+| D/E Ratio | `<100` Conservative Leverage, `100–200` Moderate Leverage, `>200` High Leverage (raw yfinance scale, where 100 = an actual D/E of 1.0) |
+| P/B Ratio | `<1` Below Book Value, `1–3` Fairly Valued, `>3` Premium Valuation |
+| 52-Week High | Distance from the latest close to the high: `Near 52-Week High` if within 5%, else `X% Below High` |
+| 52-Week Low | Distance from the latest close to the low: `Near 52-Week Low` if within 5%, else `X% Above Low` |
+| Turnover Rate | `<0.3%` Low Trading Activity, `0.3–1%` Normal Trading Activity, `>1%` High Trading Activity |
+
+The stray `$` was removed from P/E Ratio, Forward P/E, D/E Ratio, and P/B Ratio (these are multiples/ratios, not dollar amounts) and P/E-style ratios now print with an `x` suffix instead (e.g. `33.26x`). `$` is kept only on 52-Week High/Low, which are genuine prices.
+
+**Why this matters:**
+A raw number like `D/E Ratio: 18.86` doesn't tell a reader anything on its own — the tag turns every stat into an at-a-glance read on the stock's state, the same way the P/E tag already did, instead of leaving the user to know the thresholds themselves.
+
+---
+
+### Change 14 — Added Earnings Watch
+
+**What happened:**
+The Monte Carlo signal's drift and volatility come entirely from past price behavior. An earnings surprise is exactly the kind of event that can invalidate those assumptions overnight, and the tool gave no indication of whether a selected forecast horizon even overlapped one.
+
+**What the new code does:**
+`MarketContext.getEarningsWarning(tickerOfUser, latestDate, horizonsTradingDays)` pulls the next earnings date from `Ticker.calendar['Earnings Date']` (confirmed working with the installed yfinance version — no new dependency needed; `Ticker.get_earnings_dates()` was tried first but requires `lxml`, which isn't installed, so `.calendar` was used instead). Each selected horizon (given in trading days) is converted to an actual calendar date via `pandas.bdate_range(start=latestDate, periods=tradingDays+1)[-1]`, then compared against the earnings date. Horizons that extend past it are collected and reported together, e.g.:
+```
+  EARNINGS WATCH
+  Next Earnings Date: 2026-08-26 (confirmed)
+  ⚠ Your "3 Months" horizon(s) extend past this date -- Monte Carlo drift/volatility
+    are based on past price behavior and may not hold through an earnings surprise.
+```
+The `isEarningsDateEstimate` field from `.info` is surfaced as "(confirmed)" or "(estimated)" alongside the date. Printed right before the Mojo subprocess call, immediately ahead of the simulation results it's caveating. If no selected horizon is affected, or the ticker has no upcoming earnings data at all (e.g. some ETFs), the function returns `None` and the section is skipped entirely — no clutter when there's nothing to flag.
+
+**Why this matters:**
+Turns a silent blind spot in the model's assumptions into an explicit, only-when-relevant caveat, without touching the Mojo engine itself.
+
+---
+
+### Change 15 — Commodities Snapshot Now Shows Full Contract Names
+
+**What happened:**
+The table's "Ticker" column showed raw Yahoo Finance futures symbols like `CL=F`, which mean nothing without already knowing the convention (`CL` = crude oil, `=F` = futures contract).
+
+**What the new code does:**
+`commodityTickers` in `MarketContext.py` now maps each commodity to a `{"ticker": ..., "fullName": ...}` dict instead of a bare symbol string (e.g. `"Crude Oil": {"ticker": "CL=F", "fullName": "WTI Crude Oil Futures"}`). `getCommoditiesSnapshot()` returns this `fullName` alongside the existing fields, and the table's second column is renamed "Contract" and now reads `WTI Crude Oil Futures (CL=F)` — the descriptive name up front, with the raw symbol kept in parentheses for anyone who wants to look it up elsewhere. `tabulate` widens the column automatically to fit.
+
+**Why this matters:**
+`CL=F` on its own is meaningless to someone who isn't already familiar with Yahoo Finance's futures ticker convention; the full name makes the table self-explanatory.
+
+---
+
+### Change 16 — Fixed a Real Bug: Commodities "1-Day Change" Was Actually a Multi-Session Change
+
+**What happened:**
+Compared against Yahoo Finance's own live quote for CL=F (Crude Oil), the table's "1-Day Change" was showing +5.35% when the real 1-day move was +0.29% — nearly 20x off. Traced to `getCommoditiesSnapshot()` fetching 5 days of daily OHLC bars and diffing the last two closes. Commodity futures trade nearly 24/6; when the tool runs mid-session, the most recent daily bar is still live/incomplete (confirmed: its volume was ~4% of a normal day's), so diffing it against an older *settled* close produces an inflated, multi-session delta instead of a true 1-day move.
+
+**What the new code does:**
+`getCommoditiesSnapshot()` now reads each ticker's `regularMarketPrice` / `regularMarketChangePercent` directly from `Ticker.info` — the same fields that power Yahoo Finance's own quote page — instead of reconstructing the change from daily bars. Verified against CL=F: the old bar-diffing approach gave +5.2%, the new approach gives the same ~0.2–0.8% range Yahoo's live quote shows. Costs one `.info` lookup per commodity (5 sequential requests, ~2 seconds total) instead of one batched `yf.download()` call — worth it for correctness.
+
+**Why this matters:**
+A "1-Day Change" that's actually a 3-4 day change silently misrepresents momentum for exactly the kind of near-continuously-traded instrument (futures) where session boundaries are easy to get wrong.
+
+---
+
+### Change 17 — Added a Local Prediction Track Record
+
+**What happened:**
+The tool showed a BUY/SELL/HOLD signal every run but never checked whether past signals actually played out — there was no way to know if the model was any good beyond the existing single-run backtest.
+
+**What the new code does:**
+New module `TrackRecord.py`:
+- `parseMojoReport(stdoutText)` regex-parses Mojo's captured stdout (label, days, EWMA, Best/Average/Worst, Signal per horizon) — required switching the Mojo `subprocess.run()` call in `Pipeline.py` to `capture_output=True, text=True` instead of letting it stream straight to the terminal; Python now prints `result.stdout` itself, so the visible output is identical, just captured first. `MonteCarloRiskEngine.mojo` itself is untouched.
+- `logPredictions()` appends one row per selected horizon to `predictionLog.csv` (ticker, run date, target date, price at prediction, signal, Best/Average/Worst) every time `Pipeline.py` completes a run. Target date is computed the same way as Earnings Watch: `pandas.bdate_range` from the latest price date.
+- `resolveDuePredictions()` — for any logged prediction whose target date has arrived, fetches the actual price and tags it correct/incorrect: BUY is correct if the actual return was positive, SELL if negative, HOLD if the actual return stayed within ±2% (the same threshold Mojo itself uses to decide HOLD).
+- Running `python3 TrackRecord.py` directly resolves whatever's due and prints an accuracy table by signal type + overall. Deliberately kept separate from `Pipeline.py`'s main flow — logging happens automatically on every run, but checking accuracy is an on-demand step that doesn't add a prompt or fetch cost to a normal stock lookup.
+
+Tested end-to-end: logged real NVDA predictions, then verified resolution against a synthetic already-due row — fetched the actual historical price, computed the correct return, and tagged it correctly.
+
+`predictionLog.csv` is gitignored (per-user runtime state, grows with usage, not source).
+
+**Why this matters:**
+Turns the tool's own signal into something it can be held accountable to over time, instead of a number that's shown once and forgotten.
+
+---
+
 ## Summary Table
 
 | # | File | Change | Problem Solved |
@@ -278,3 +387,9 @@ Anyone opening the repo can now tell at a glance what's the product versus what'
 | 9 | Python | Renamed `MarketContext.py` identifiers to camelCase | Matches the naming convention used everywhere else in the project |
 | 10 | Python | Gated 4 of 5 `MarketContext.py` sections behind a y/n prompt | Users analyzing a single stock aren't forced to see market-wide context they didn't ask for |
 | 11 | Structure | Reorganized into `SimulationWork/`, `benchmarks/`, `docs/` + added `README.md`/`.gitignore` | Repo now visually separates the real product from the benchmark demo and context docs |
+| 12 | Python | Split the market-context prompt into "market pulse" (before ticker) and "sector fear index" (after stats); reordered Investment Horizon Fit after the fear index table | Market mood can inform stock choice; per-stock report is less cluttered |
+| 13 | Python | Added interpretive tags to every fundamental stat; fixed incorrect `$` formatting on non-dollar ratios | Every number now shows what it means, not just its raw value |
+| 14 | Python | Added Earnings Watch (flags forecast horizons crossing the next earnings date) | Surfaces a real blind spot in the Monte Carlo model's assumptions, only when relevant |
+| 15 | Python | Commodities Snapshot shows full contract names, not just raw futures symbols | `CL=F` alone meant nothing without knowing Yahoo's ticker convention |
+| 16 | Python | Fixed Commodities "1-Day Change" (was diffing a live/incomplete bar against a stale settled close) | Displayed change was off by up to ~20x versus Yahoo's real live quote |
+| 17 | Python | Added `TrackRecord.py` — logs every run's predictions, resolves outcomes, reports accuracy | Signals were shown once and forgotten; now there's a real accountability record over time |
