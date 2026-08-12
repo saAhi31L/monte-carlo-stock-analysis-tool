@@ -1,11 +1,12 @@
 # Project1 — Stock Analysis & Monte Carlo Risk Engine
 
-A CLI tool that analyzes a stock (via yfinance), runs a Mojo-powered Monte Carlo
-price simulation across multiple time horizons, and prints a BUY/SELL/HOLD signal
-alongside fundamentals (each tagged with a plain-language read, e.g. "33.26x
-(Over-Saturated)"), an Earnings Watch caveat, and optional broader market context
-(sentiment, commodities, market regime, sector fear index). Every run's predictions
-are logged locally so their real-world accuracy can be checked later.
+A CLI tool that analyzes a stock (via yfinance), runs a Monte Carlo price
+simulation across multiple time horizons using the interoperability between
+Python and Mojo, and prints a BUY/SELL/HOLD signal alongside fundamentals
+(each tagged with a plain-language read, e.g. "33.26x (Over-Saturated)"), an
+Earnings Watch caveat, and optional broader market context (sentiment,
+commodities, market regime, sector fear index). Every run's predictions are
+logged locally so their real-world accuracy can be checked later.
 
 ## Folder structure
 
